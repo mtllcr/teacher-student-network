@@ -9,3 +9,5 @@
 /trained_model/student_model.pth
 /trained_model/teacher_model.pth
 /data/cifar-10-batches-py/test_batch
+/sandbox
+/sandbox/testing.py
