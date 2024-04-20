@@ -1,16 +1,13 @@
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
+from captum.attr import Saliency, IntegratedGradients, NoiseTunnel, DeepLift
+from captum.attr import visualization as viz
 from time import time
 # Check if GPU is available, and if not, use the CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
 
 def train_first_stage(dataloader, student, teacher, criterion_hint, epochs, learning_rate):
     """ Train only up to the intermediate layer """
@@ -74,3 +71,20 @@ class ConvolutionalRegressor(nn.Module):
     
 def hint_loss(student_activations, teacher_activations):
     return torch.nn.functional.mse_loss(student_activations, teacher_activations).to(device)
+
+
+def show_saliency_map(model, data_loader, img_index=3 ):
+    dataiter = iter(data_loader)
+    images, labels = next(dataiter)
+    input = images[img_index].unsqueeze(0)
+    original_image = np.transpose((images[img_index].cpu().detach().numpy() / 2) + 0.5, (1, 2, 0))
+    input.requires_grad = True
+    model.eval()
+    saliency = Saliency(model)
+    gradients = saliency.attribute(input, target=labels[img_index].item())
+    gradients = np.transpose(gradients.squeeze().cpu().detach().numpy(), (1, 2, 0))
+    classes = ('plane', 'car', 'bird', 'cat','deer', 'dog', 'frog', 'horse', 'ship', 'truck')
+    img_label = classes[labels[img_index]]
+    _ = viz.visualize_image_attr(gradients, original_image, method="blended_heat_map", sign="absolute_value",
+                              show_colorbar=True, title="Overlayed Gradient Magnitudes - Image #" + img_label )
+    return None
