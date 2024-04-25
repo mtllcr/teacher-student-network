@@ -7,6 +7,7 @@ import torch.nn.init as init
 from captum.attr import Saliency, IntegratedGradients, NoiseTunnel, DeepLift
 from captum.attr import visualization as viz
 from time import time
+import gc
 # Check if GPU is available, and if not, use the CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,9 +25,11 @@ def train_first_stage(dataloader, student, teacher, criterion_hint, epochs, lear
     list(filter(lambda p: p.requires_grad, student.parameters())) + list(regressor.parameters()),
     lr=learning_rate
                         )
+    losses_epoch = []
     teacher_layer_hook= Hook(teacher_layer)
     student_layer_hook= Hook(student_layer)
     for epoch in range(epochs):
+        losses = []
         for inputs, _ in dataloader:
             inputs = inputs.to(device)
             optimizer.zero_grad()
@@ -44,16 +47,23 @@ def train_first_stage(dataloader, student, teacher, criterion_hint, epochs, lear
             #print(f'student inter shape {student_activations.shape}')
             #  the hint loss
             loss = criterion_hint(student_activations, teacher_activations_trans)
+            
             loss.backward()
             optimizer.step()
-          
+            losses.append(loss.item())
         print(f"Epoch {epoch+1}/{epochs}, Loss: {loss}")
+        losses_epoch.append(np.mean(losses))
 
     end = time()
     unfreeze_all_layers(student)
     print(f"First Stage Training Time: {end - start}")
     student_layer_hook.close()
     teacher_layer_hook.close()
+    regressor.to('cpu')
+    optimizer.state.clear()
+    del optimizer
+    torch.cuda.empty_cache() 
+    return losses_epoch
 
 def train_kd_intermediate_combined(teacher, student, train_loader, epochs, learning_rate, T, soft_target_loss_weight, 
                           device, criterion_hint, student_layer, teacher_layer, early_stop = False):
@@ -72,9 +82,11 @@ def train_kd_intermediate_combined(teacher, student, train_loader, epochs, learn
     teacher.eval()  # Teacher set to evaluation mode
     student.train() # Student to train mode
     regressor.train()
+    losses_epoch = []
 
     for epoch in range(epochs):
         running_loss = 0.0
+        losses = []
         for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
 
@@ -105,20 +117,27 @@ def train_kd_intermediate_combined(teacher, student, train_loader, epochs, learn
 
             # Weighted sum of the two losses
             loss = soft_target_loss_weight * soft_targets_loss + ce_loss_weight * label_loss + mse_loss
-
+            
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()
-
+            running_loss += float(loss.item())
+            losses.append(loss.item())
+        losses_epoch.append(np.mean(losses))
         print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss / len(train_loader)}")
         if early_stop and early_stopper.check_loss(running_loss):
           break
     end = time()
     runtime = end - start
     print(f"Training Time: {runtime:.3f}")
+    regressor.to('cpu')
     student_layer_hook.close()
     teacher_layer_hook.close()
+    optimizer.state.clear()
+    del optimizer
+    torch.cuda.empty_cache() 
+    inputs, labels = inputs.to('cpu'), labels.to('cpu')
+    return losses_epoch
 
 def freeze_after_intermediate_layer2( layer):
         layer.requires_grad = False
@@ -197,3 +216,80 @@ class EarlyStopper:
             if self.counter >= self.patience:
                 return True
         return False
+    
+
+import matplotlib.pyplot as plt
+
+def normalize_losses(loss_lists):
+    """
+    Normalize a list of loss lists using min-max scaling.
+    """
+    normalized_losses = []
+    for losses in loss_lists:
+        min_loss = min(losses)
+        max_loss = max(losses)
+        normalized = [(loss - min_loss) / (max_loss - min_loss) for loss in losses]
+        normalized_losses.append(normalized)
+    return normalized_losses
+
+def plot_normalized_losses(loss_lists, labels, title="Normalized Loss over Epochs", xlabel="Epochs", ylabel="Normalized Loss"):
+    """
+    Plots normalized losses over epochs for multiple models on the same graph.
+
+    Parameters:
+    loss_lists (list of lists): A list where each element is a list of loss values for a model.
+    labels (list of str): A list of labels for each model.
+    title, xlabel, ylabel: Plot formatting parameters.
+    """
+    normalized_losses = normalize_losses(loss_lists)
+    epochs = range(1, len(normalized_losses[0]) + 1)
+    
+    plt.figure(figsize=(10, 6))
+    for losses, label in zip(normalized_losses, labels):
+        plt.plot(epochs, losses, marker='o', linestyle='-', label=label)
+    
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.grid(visible=True, which='both', linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    plt.show()
+
+import matplotlib.pyplot as plt
+
+def plot_model_accuracies(model_names, accuracies, title="Model Accuracies", xlabel="Models", ylabel="Accuracy"):
+    """
+    Plots a bar chart of model accuracies.
+
+    Parameters:
+    - model_names: A list of names of the models (str).
+    - accuracies: A list of accuracies corresponding to the models (float).
+    - title: Title of the plot (str).
+    - xlabel: Label for the x-axis (str).
+    - ylabel: Label for the y-axis (str).
+    """
+    # Set the positions and width for the bars
+    positions = range(len(model_names))
+    width = 0.5  # the width of the bars
+
+    # Plotting the bar chart
+    plt.figure(figsize=(10, 6))
+    plt.bar(positions, accuracies, width, align='center', alpha=0.7, color='b')
+
+    # Adding the aesthetics
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.xticks(positions, model_names)  # Replace default x-ticks with models' names
+    plt.ylim([0, 100])  # Assuming accuracy is between 0 and 1
+
+    # Adding the accuracy values on top of the bars
+    for i, acc in enumerate(accuracies):
+        plt.text(i, acc, f"{acc}", ha='center')
+
+    # Show the plot
+    plt.tight_layout()
+    plt.show()
+
+
