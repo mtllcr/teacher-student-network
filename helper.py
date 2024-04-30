@@ -66,11 +66,11 @@ def train_first_stage(dataloader, student, teacher, criterion_hint, epochs, lear
     return losses_epoch
 
 def train_kd_intermediate_combined(teacher, student, train_loader, epochs, learning_rate, T, soft_target_loss_weight, 
-                          device, criterion_hint, student_layer, teacher_layer, early_stop = False):
+                          device, criterion_hint, student_layer, teacher_layer, test_loader, mse_loss_weight = 0.6, early_stop = False):
     print('Knowledge distillation training')
     start = time()
     early_stopper = EarlyStopper(patience=3, min_improv=0.1)
-    ce_loss_weight= 1 - soft_target_loss_weight
+    ce_loss_weight= 1 - soft_target_loss_weight - mse_loss_weight
     ce_loss = nn.CrossEntropyLoss().to(device)
     regressor = ConvolutionalRegressor2().to(device)
     optimizer = optim.Adam(
@@ -83,6 +83,7 @@ def train_kd_intermediate_combined(teacher, student, train_loader, epochs, learn
     student.train() # Student to train mode
     regressor.train()
     losses_epoch = []
+    acc_epoch = []
 
     for epoch in range(epochs):
         running_loss = 0.0
@@ -116,17 +117,39 @@ def train_kd_intermediate_combined(teacher, student, train_loader, epochs, learn
             label_loss = ce_loss(student_logits, labels)
 
             # Weighted sum of the two losses
-            loss = soft_target_loss_weight * soft_targets_loss + ce_loss_weight * label_loss + mse_loss
+            loss = soft_target_loss_weight * soft_targets_loss + ce_loss_weight * label_loss + mse_loss_weight*mse_loss
             
             loss.backward()
             optimizer.step()
 
             running_loss += float(loss.item())
             losses.append(loss.item())
-        losses_epoch.append(np.mean(losses))
+        #losses_epoch.append(np.mean(losses))
         print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss / len(train_loader)}")
         if early_stop and early_stopper.check_loss(running_loss):
           break
+        
+            
+        # on testing data
+        correct_test = 0
+        total_test = 0
+        test_current_loss = 0.0
+        with torch.no_grad():
+            for data in test_loader:
+                inputs, labels = data[0].to(device), data[1].to(device)
+
+                outputs = student(inputs)
+                loss = ce_loss(outputs, labels)
+                test_current_loss += loss.item()
+                _, predicted = torch.max(outputs, 1)
+                total_test += labels.size(0)
+                correct_test += (predicted == labels).sum().item()
+
+        losses_epoch.append(test_current_loss / len(test_loader))
+        acc_epoch.append(100 * correct_test / total_test)
+        print('[%d] test_loss: %.3f, test_accuracy: %.2f %%' %
+        (epoch + 1, test_current_loss / len(test_loader), 100 * correct_test / total_test))
+
     end = time()
     runtime = end - start
     print(f"Training Time: {runtime:.3f}")
